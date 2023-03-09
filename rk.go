@@ -1,18 +1,18 @@
-package service
+package rkyz_go_sdk
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"net"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/google/martian/log"
+	"github.com/denisbrodbeck/machineid"
 	"github.com/marspere/goencrypt"
 )
 
@@ -38,7 +38,7 @@ type RKRequest struct {
 
 	Username string `json:"username"`
 
-	Var []string `json:"vars"`
+	Vars map[string]string `json:"vars"`
 }
 
 type RKResponse struct {
@@ -49,10 +49,11 @@ type RKResponse struct {
 
 var (
 	rkAPI            = "http://api.ruikeyz.com/netver/webapi"
+	rkAPI2           = "http://api2.ruikeyz.com/netver/webapi"
 	RKHandler        *RKRequest
 	CipherDES        *goencrypt.CipherDES
-	Salt             = "iamsalt"
-	DESKey           = []byte("iamdeskey")
+	Salt             = "Salt"
+	DESKey           = []byte("DESKey")
 	Platformusercode = "Platformusercode"
 	Goodscode        = "Goodscode"
 
@@ -77,16 +78,19 @@ func init() {
 		MacCode:     "1234",
 		RequestFlag: "1234",
 		Version:     "v1.0",
-		Var:         make([]string, 0),
+		Vars:        make(map[string]string, 0),
 	}
-	interfaces, _ := net.Interfaces()
-	for _, device := range interfaces {
-		if device.HardwareAddr.String() != "" {
-			RKHandler.MacCode = device.HardwareAddr.String()
-			break
-		}
-	}
+
+	RKHandler.MacCode = GetPhysicalID()
 	// go RKHandler.Init()
+}
+
+func GetPhysicalID() string {
+	hashedID, err := machineid.ProtectedID("traffic_manager")
+	if err != nil {
+		return ""
+	}
+	return hashedID
 }
 
 func (r *RKRequest) Init() error {
@@ -130,7 +134,7 @@ func (r *RKRequest) Init() error {
 	return nil
 }
 
-func (r *RKRequest) Login(username, passwd string) (string, int) {
+func (r *RKRequest) Login(username, passwd string) (string, string, int) {
 	r.Businessid = 3
 	r.RequestFlag = strconv.FormatInt(time.Now().UnixMilli()<<5, 10)
 	data := map[string]interface{}{
@@ -146,13 +150,13 @@ func (r *RKRequest) Login(username, passwd string) (string, int) {
 
 	resp, err := r.SignAndRequest()
 	if err != nil {
-		panic(err)
+		return "", "登录失败，请重试", -1
 	}
 
 	plain, err := CipherDES.DESDecrypt(resp.Data)
 	if err != nil {
-		log.Errorf("登录解密失败:", resp)
-		return resp.Msg, resp.Code
+		log.Println("登录解密失败:", resp)
+		return "", resp.Msg, resp.Code
 	}
 
 	type loginResp struct {
@@ -164,7 +168,7 @@ func (r *RKRequest) Login(username, passwd string) (string, int) {
 	rp := &loginResp{}
 	err = json.Unmarshal([]byte(plain), rp)
 	if err != nil {
-		panic(err)
+		log.Println(err)
 	}
 
 	if r.RequestFlag != rp.RequestFlag || rp.EndTime == "" || rp.HeartbeatKey == "" {
@@ -177,7 +181,7 @@ func (r *RKRequest) Login(username, passwd string) (string, int) {
 	r.EndTime = rp.EndTime
 	r.Username = username
 
-	return resp.Msg, resp.Code
+	return r.Username, resp.Msg, resp.Code
 }
 
 func (r *RKRequest) Register(username, passwd, qq string) (string, int) {
@@ -197,14 +201,14 @@ func (r *RKRequest) Register(username, passwd, qq string) (string, int) {
 
 	resp, err := r.SignAndRequest()
 	if err != nil {
-		log.Errorf("SignAndRequest失败%v", err)
-		return InternalError.Error(), -1
+		log.Println("SignAndRequest失败", err)
+		return resp.Msg, -1
 	}
 
 	plain, err := CipherDES.DESDecrypt(resp.Data)
 	if err != nil {
-		log.Errorf("des结果解密失败%v，resp:%v", err, resp)
-		return InternalError.Error(), -1
+		log.Println("des结果解密失败，resp:", err, resp.Msg)
+		return resp.Msg, -1
 	}
 
 	type registerResp struct {
@@ -214,13 +218,14 @@ func (r *RKRequest) Register(username, passwd, qq string) (string, int) {
 	rp := &registerResp{}
 	err = json.Unmarshal([]byte(plain), rp)
 	if err != nil {
+		log.Println(err)
 		return InternalError.Error(), -1
 	}
 	if r.RequestFlag != rp.RequestFlag {
-		fmt.Println("flag不一致，退出！")
+		log.Println("flag不一致，退出！")
 		os.Exit(-1)
 	}
-	fmt.Println("注册结果：", resp.Msg, resp.Code)
+	log.Println("注册结果：", resp.Msg, resp.Code)
 	return resp.Msg, resp.Code
 }
 
@@ -246,7 +251,7 @@ func (r *RKRequest) Heartbeat(username string) error {
 
 	plain, err := CipherDES.DESDecrypt(resp.Data)
 	if err != nil {
-		log.Errorf("des结果解密失败:resp=%v, err=%v", resp, err)
+		log.Println("des结果解密失败:resp=, err=", resp, err)
 		return err
 	}
 
@@ -269,11 +274,14 @@ func (r *RKRequest) Heartbeat(username string) error {
 }
 
 func (r *RKRequest) SignAndRequest() (rkResp *RKResponse, err error) {
+	rkResp = &RKResponse{Code: -1, Msg: "内部错误，请再试一次"}
 	plain := fmt.Sprintf("%v%v%v%v%v%v%v%v%v", r.Businessid, r.Encrypttypeid, r.Platformusercode, r.Goodscode, r.Inisoftkey, time.Now().UnixMilli(), r.Data, Salt, 1)
 	// 签名算法(顺序不能变)：md5(businessID+encrypttypeid+platformusercode+softcode+inisoftkey+timestamp+data+signSalt+platformtypeid)
 	signed, err := goencrypt.MD5(plain)
 	if err != nil {
-		panic(err)
+		log.Println(err)
+		rkResp.Msg = err.Error()
+		return
 	}
 	r.Sign = strings.ToLower(signed.UpperCase32())
 
@@ -291,36 +299,53 @@ func (r *RKRequest) SignAndRequest() (rkResp *RKResponse, err error) {
 
 	encoded, err := json.Marshal(&body)
 	if err != nil {
-		panic(err)
+		log.Println(err)
+		rkResp.Msg = err.Error()
+		return
 	}
 
-	request, err := http.NewRequest(http.MethodPost, rkAPI, bytes.NewReader(encoded))
+	request, err := http.NewRequest(http.MethodPost, rkAPI2, bytes.NewReader(encoded))
 	if err != nil {
-		return
+		log.Println("http new request报错", err)
+		if err != nil {
+			rkResp.Msg = err.Error()
+			return
+		}
 	}
 
 	request.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	request.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
 	request.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.108 Safari/537.36")
 
+	http.DefaultClient.Timeout = time.Second * 8
 	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
-		panic(err)
+		request, err = http.NewRequest(http.MethodPost, rkAPI, bytes.NewReader(encoded))
+		resp, err = http.DefaultClient.Do(request)
+		if err != nil {
+			log.Println("第二次post失败，", err)
+			rkResp.Msg = err.Error()
+			return
+		}
 	}
-	rBody, err := ioutil.ReadAll(resp.Body)
+	rBody := new(bytes.Buffer)
+	_, err = io.Copy(rBody, resp.Body)
 	if err != nil {
+		fmt.Println("SignAndRequest io.copy err:", err)
+		rkResp.Msg = err.Error()
 		return
 	}
-	rkResp = &RKResponse{}
-	err = json.Unmarshal(rBody, rkResp)
+
+	err = json.Unmarshal(rBody.Bytes(), rkResp)
 	if err != nil {
+		rkResp.Msg = err.Error()
 		return
 	}
 
 	return
 }
 
-func (r *RKRequest) Recharge(account, card string) int {
+func (r *RKRequest) Recharge(account, card string) (string, int) {
 	r.Businessid = 19
 	r.RequestFlag = strconv.FormatInt(time.Now().UnixMilli()<<5, 10)
 	data := map[string]interface{}{
@@ -336,11 +361,11 @@ func (r *RKRequest) Recharge(account, card string) int {
 
 	resp, err := r.SignAndRequest()
 	if err != nil {
-		panic(err)
+		log.Println(err)
 	}
 
 	fmt.Println("充值结果：", resp.Msg, resp.Code)
-	return resp.Code
+	return resp.Msg, resp.Code
 }
 
 func (r *RKRequest) GetRemote(name string) (string, int) {
@@ -360,13 +385,13 @@ func (r *RKRequest) GetRemote(name string) (string, int) {
 
 	resp, err := r.SignAndRequest()
 	if err != nil {
-		log.Errorf("获取远程变量失败, code=%d, msg=%s, err=%s", resp.Code, resp.Msg, err.Error())
+		log.Println("获取远程变量失败, code=, msg=, err=", resp.Code, resp.Msg, err.Error())
 		return resp.Msg, resp.Code
 	}
 
 	plain, err := CipherDES.DESDecrypt(resp.Data)
 	if err != nil {
-		log.Errorf("远程变量解密失败，des结果解密失败：%v，resp=%v", err, resp)
+		log.Println("远程变量解密失败，des结果解密失败：，resp=", err, resp)
 		return resp.Msg, resp.Code
 	}
 
@@ -381,16 +406,15 @@ func (r *RKRequest) GetRemote(name string) (string, int) {
 	rp := &getRemoteVarResp{}
 	err = json.Unmarshal([]byte(plain), rp)
 	if err != nil {
-		log.Errorf("远程变量Unmarshal失败, code=%d, msg=%s, err=%s", resp.Code, resp.Msg, err.Error())
+		log.Println("远程变量Unmarshal失败, code=, msg=, err=", resp.Code, resp.Msg, err.Error())
 	}
 	if r.RequestFlag != rp.RequestFlag {
-		fmt.Println("flag不一致，退出！")
+		log.Println("flag不一致，退出！")
 		os.Exit(-1)
 	}
 	for _, v := range rp.VarValues {
-		r.Var = append(r.Var, v.VarValue)
+		r.Vars[v.VarName] = v.VarValue
 	}
 
-	fmt.Println("获取的变量值：", r.Var)
 	return resp.Msg, resp.Code
 }
