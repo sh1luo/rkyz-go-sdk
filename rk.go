@@ -1,4 +1,4 @@
-package rkyz_go_sdk
+package rkyz
 
 import (
 	"bytes"
@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/denisbrodbeck/machineid"
 	"github.com/marspere/goencrypt"
 )
 
@@ -39,6 +38,9 @@ type RKRequest struct {
 	Username string `json:"username"`
 
 	Vars map[string]string `json:"vars"`
+
+	Notice   string `json:"notice"`   //公告
+	Basedata string `json:"basedata"` //基础数据
 }
 
 type RKResponse struct {
@@ -48,21 +50,24 @@ type RKResponse struct {
 }
 
 var (
-	rkAPI            = "http://api.ruikeyz.com/netver/webapi"
-	rkAPI2           = "http://api2.ruikeyz.com/netver/webapi"
-	RKHandler        *RKRequest
-	CipherDES        *goencrypt.CipherDES
-	Salt             = "Salt"
-	DESKey           = []byte("DESKey")
-	Platformusercode = "Platformusercode"
-	Goodscode        = "Goodscode"
+	RKAPI     = "http://api.ruikeyz.com/netver/webapi"
+	RKAPI2    = "http://api2.ruikeyz.com/netver/webapi"
+	RKHandler *RKRequest
+	CipherDES *goencrypt.CipherDES
+)
 
-	InternalError error
+var (
+	Salt = "iamsalt"
+
+	DESKey = []byte{}
+
+	Platformusercode = ""
+
+	Goodscode = ""
 )
 
 func init() {
 	CipherDES = goencrypt.NewDESCipher(DESKey, nil, goencrypt.ECBMode, goencrypt.Pkcs7, goencrypt.PrintHex)
-	InternalError = fmt.Errorf("内部错误")
 	RKHandler = &RKRequest{
 		// 1：软件初始化      2：账号注册      3：账号登录      4：单码登录      5：心跳
 		Businessid:       1,
@@ -85,14 +90,6 @@ func init() {
 	// go RKHandler.Init()
 }
 
-func GetPhysicalID() string {
-	hashedID, err := machineid.ProtectedID("traffic_manager")
-	if err != nil {
-		return ""
-	}
-	return hashedID
-}
-
 func (r *RKRequest) Init() error {
 	r.RequestFlag = strconv.FormatInt(time.Now().UnixMilli()<<5, 10)
 	data := map[string]interface{}{
@@ -107,30 +104,56 @@ func (r *RKRequest) Init() error {
 
 	resp, err := r.SignAndRequest()
 	if err != nil {
+		log.Println(err)
 		return err
 	}
 
 	plain, err := CipherDES.DESDecrypt(resp.Data)
 	if err != nil {
-		return fmt.Errorf("des结果解密失败：%v，resp=%v", err, resp)
+		log.Println(err)
+		return err
 	}
 
 	type initResp struct {
 		RequestFlag string `json:"requestflag"`
 		Inisoftkey  string `json:"inisoftkey"`
-		softinfo    struct {
+		Softinfo    struct {
+			Softname              string `json:"softname"`
+			Consultwebsite        string `json:"consultwebsite"`
+			Consultqq             string `json:"consultqq"`
+			Consultwx             string `json:"consultwx"`
+			Consulttel            string `json:"consulttel"`
+			Opentestcount         int    `json:"opentestcount"`
+			Opentestday           int    `json:"opentestday"`
+			Logourl               string `json:"logourl"`
+			Notice                string `json:"notice"`   //公告
+			Basedata              string `json:"basedata"` //基础数据
+			Newversionnum         string `json:"newversionnum"`
+			Networkdiskurl        string `json:"networkdiskurl"`
+			Diskpwd               string `json:"diskpwd"`
+			Isforceupd            int    `json:"isforceupd"`
+			Logintypeid           int    `json:"logintypeid"`
+			Consumetypeid         int    `json:"consumetypeid"`
+			Isoutsoftuser         int    `json:"isoutsoftuser"`
+			Isbinding             int    `json:"isbinding"`
+			Deductionconsumevalue int    `json:"deductionconsumevalue"`
+			Maxloginnum           int    `json:"maxloginnum"`
 		} `json:"softinfo"`
 	}
 	rp := &initResp{}
 	err = json.Unmarshal([]byte(plain), rp)
 	if err != nil {
+		log.Println(err)
 		return err
 	}
 	if r.RequestFlag != rp.RequestFlag {
-		return fmt.Errorf("初始化flag不一致，退出！：%v，resp=%v", err, resp)
+		log.Println(err)
+		return err
 	}
 	r.Inisoftkey = rp.Inisoftkey
-	fmt.Println("初始化结果：", resp.Msg, resp.Code)
+	r.Basedata = rp.Softinfo.Basedata
+	r.Notice = rp.Softinfo.Notice
+	log.Printf("初始化结果：%s，基础信息：%s，公告：%s\n", resp.Msg, r.Basedata, r.Notice)
 	return nil
 }
 
@@ -150,6 +173,7 @@ func (r *RKRequest) Login(username, passwd string) (string, string, int) {
 
 	resp, err := r.SignAndRequest()
 	if err != nil {
+		log.Println(err)
 		return "", "登录失败，请重试", -1
 	}
 
@@ -172,7 +196,7 @@ func (r *RKRequest) Login(username, passwd string) (string, string, int) {
 	}
 
 	if r.RequestFlag != rp.RequestFlag || rp.EndTime == "" || rp.HeartbeatKey == "" {
-		fmt.Println("flag不一致、endtime or hearbeat key is nil，退出！", *rp)
+		log.Println("flag不一致、endtime or hearbeat key is nil，退出！", *rp)
 		os.Exit(-1)
 	}
 
@@ -182,6 +206,53 @@ func (r *RKRequest) Login(username, passwd string) (string, string, int) {
 	r.Username = username
 
 	return r.Username, resp.Msg, resp.Code
+}
+
+// 单码验证
+func (r *RKRequest) SingleCodeLogin(cardnum string) (string, int) {
+	r.Businessid = 4
+	r.RequestFlag = strconv.FormatInt(time.Now().UnixMilli()<<5, 10)
+	data := map[string]interface{}{
+		"requestflag": r.RequestFlag,
+		"maccode":     r.MacCode,
+		"timestamp":   time.Now().UnixMilli(),
+		"cardnum":     cardnum,
+	}
+	d, _ := json.Marshal(data)
+	cipherText, _ := CipherDES.DESEncrypt(d)
+	r.Data = cipherText
+	resp, err := r.SignAndRequest()
+	if err != nil {
+		return "", -1
+	}
+	plain, err := CipherDES.DESDecrypt(resp.Data)
+	if err != nil {
+		if resp.Msg == "单码到期" {
+			log.Println("已到期,请联系代理商续费")
+		} else {
+			log.Println("错误:", resp.Msg)
+		}
+		return resp.Msg, resp.Code
+	}
+	type loginResp struct {
+		RequestFlag  string `json:"requestflag"`
+		Token        string `json:"token"`
+		HeartbeatKey string `json:"heartbeatkey"`
+		EndTime      string `json:"endtime"`
+	}
+	rp := &loginResp{}
+	err = json.Unmarshal([]byte(plain), rp)
+	if err != nil {
+		log.Println(err)
+	}
+	if r.RequestFlag != rp.RequestFlag || rp.EndTime == "" || rp.HeartbeatKey == "" {
+		fmt.Println("flag不一致、runtime or heartbeat key is nil，退出！", *rp)
+		os.Exit(-1)
+	}
+	r.Token = rp.Token
+	r.HeartbeatKey = rp.HeartbeatKey
+	r.EndTime = rp.EndTime
+	return resp.Msg, resp.Code
 }
 
 func (r *RKRequest) Register(username, passwd, qq string) (string, int) {
@@ -219,7 +290,7 @@ func (r *RKRequest) Register(username, passwd, qq string) (string, int) {
 	err = json.Unmarshal([]byte(plain), rp)
 	if err != nil {
 		log.Println(err)
-		return InternalError.Error(), -1
+		return err.Error(), -1
 	}
 	if r.RequestFlag != rp.RequestFlag {
 		log.Println("flag不一致，退出！")
@@ -246,6 +317,7 @@ func (r *RKRequest) Heartbeat(username string) error {
 
 	resp, err := r.SignAndRequest()
 	if err != nil {
+		log.Println(err)
 		return err
 	}
 
@@ -264,11 +336,12 @@ func (r *RKRequest) Heartbeat(username string) error {
 	rp := &heartbeatResp{}
 	err = json.Unmarshal([]byte(plain), rp)
 	if err != nil {
+		log.Println(err)
 		return err
 	}
 	r.HeartbeatKey = rp.HeartbeatKey
 	r.EndTime = rp.EndTime
-	fmt.Println("心跳结果：", resp.Msg, resp.Code)
+	log.Println("心跳结果：", resp.Msg, resp.Code)
 
 	return nil
 }
@@ -304,23 +377,17 @@ func (r *RKRequest) SignAndRequest() (rkResp *RKResponse, err error) {
 		return
 	}
 
-	request, err := http.NewRequest(http.MethodPost, rkAPI2, bytes.NewReader(encoded))
-	if err != nil {
-		log.Println("http new request报错", err)
-		if err != nil {
-			rkResp.Msg = err.Error()
-			return
-		}
-	}
+	request, _ := http.NewRequest(http.MethodPost, RKAPI, bytes.NewReader(encoded))
 
 	request.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	request.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
 	request.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.108 Safari/537.36")
 
-	http.DefaultClient.Timeout = time.Second * 8
+	http.DefaultClient.Timeout = time.Second * 5
 	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
-		request, err = http.NewRequest(http.MethodPost, rkAPI, bytes.NewReader(encoded))
+		log.Println("第一次请求失败，准备开始第二次，", err)
+		request, _ = http.NewRequest(http.MethodPost, RKAPI2, bytes.NewReader(encoded))
 		resp, err = http.DefaultClient.Do(request)
 		if err != nil {
 			log.Println("第二次post失败，", err)
@@ -331,13 +398,14 @@ func (r *RKRequest) SignAndRequest() (rkResp *RKResponse, err error) {
 	rBody := new(bytes.Buffer)
 	_, err = io.Copy(rBody, resp.Body)
 	if err != nil {
-		fmt.Println("SignAndRequest io.copy err:", err)
+		log.Println("SignAndRequest io.copy err:", err)
 		rkResp.Msg = err.Error()
 		return
 	}
 
 	err = json.Unmarshal(rBody.Bytes(), rkResp)
 	if err != nil {
+		log.Println(err)
 		rkResp.Msg = err.Error()
 		return
 	}
@@ -362,9 +430,10 @@ func (r *RKRequest) Recharge(account, card string) (string, int) {
 	resp, err := r.SignAndRequest()
 	if err != nil {
 		log.Println(err)
+		return "充值失败，内部错误", -1
 	}
 
-	fmt.Println("充值结果：", resp.Msg, resp.Code)
+	log.Println("充值结果：", resp.Msg, resp.Code)
 	return resp.Msg, resp.Code
 }
 
@@ -419,15 +488,15 @@ func (r *RKRequest) GetRemote(name string) (string, int) {
 	return resp.Msg, resp.Code
 }
 
-//单码验证
-func (r *RKRequest) SingleCodeLogin(cardnum string) (string, int) {
-	r.BusinessId = 4
+func (r *RKRequest) Logout(username string) int {
+	r.Businessid = 7
 	r.RequestFlag = strconv.FormatInt(time.Now().UnixMilli()<<5, 10)
 	data := map[string]interface{}{
-		"requestflag": r.RequestFlag,
-		"maccode":     r.MacCode,
-		"timestamp":   time.Now().UnixMilli(),
-		"cardnum":     cardnum,
+		"requestflag":       r.RequestFlag,
+		"maccode":           r.MacCode,
+		"timestamp":         time.Now().UnixMilli(),
+		"token":             r.Token,
+		"cardnumorusername": username,
 	}
 	d, _ := json.Marshal(data)
 	cipherText, _ := CipherDES.DESEncrypt(d)
@@ -435,39 +504,10 @@ func (r *RKRequest) SingleCodeLogin(cardnum string) (string, int) {
 
 	resp, err := r.SignAndRequest()
 	if err != nil {
-		return "", -1
+		log.Println("SignAndRequest失败", err, resp.Msg, resp.Code)
+		return -1
 	}
 
-	plain, err := CipherDES.DESDecrypt(resp.Data)
-	if err != nil {
-		if resp.Msg == "单码到期" {
-			log.Println("已到期,请联系代理商续费")
-		} else {
-			log.Println("错误:", resp.Msg)
-		}
-		return resp.Msg, resp.Code
-	}
-
-	type loginResp struct {
-		RequestFlag  string `json:"requestflag"`
-		Token        string `json:"token"`
-		HeartbeatKey string `json:"heartbeatkey"`
-		EndTime      string `json:"endtime"`
-	}
-	rp := &loginResp{}
-	err = json.Unmarshal([]byte(plain), rp)
-	if err != nil {
-		log.Println(err)
-	}
-
-	if r.RequestFlag != rp.RequestFlag || rp.EndTime == "" || rp.HeartbeatKey == "" {
-		fmt.Println("flag不一致、runtime or heartbeat key is nil，退出！", *rp)
-		os.Exit(-1)
-	}
-
-	r.Token = rp.Token
-	r.HeartbeatKey = rp.HeartbeatKey
-	r.EndTime = rp.EndTime
-
-	return resp.Msg, resp.Code
+	log.Println("退出登录结果：", resp.Msg, resp.Code)
+	return resp.Code
 }
